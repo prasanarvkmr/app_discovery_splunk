@@ -1,0 +1,34 @@
+# Splunk Application Discovery Tool
+# ==================================
+# Python dependencies for the application discovery tool
+
+# Core Dependencies
+# -----------------
+splunk-sdk>=2.0.0          # Official Splunk SDK for Python
+pandas>=1.5.0              # Data manipulation and analysis
+requests>=2.28.0           # HTTP library (backup for REST API)
+
+# Reporting Dependencies
+# ----------------------
+openpyxl>=3.0.0            # Excel file generation
+jinja2>=3.0.0              # HTML template rendering (optional)
+
+# Configuration
+# -------------
+pyyaml>=6.0                # YAML configuration file support
+
+# Optional: Enhanced Features
+# ---------------------------
+# Uncomment if needed:
+# matplotlib>=3.5.0        # Chart generation
+# plotly>=5.0.0            # Interactive visualizations
+# tabulate>=0.9.0          # Pretty table printing
+
+# Development Dependencies
+# ------------------------
+# Uncomment for development:
+# pytest>=7.0.0            # Testing framework
+# pytest-cov>=4.0.0        # Test coverage
+# black>=23.0.0            # Code formatting
+# flake8>=6.0.0            # Linting
+# mypy>=1.0.0              # Type checking

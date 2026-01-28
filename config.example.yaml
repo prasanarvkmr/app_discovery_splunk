@@ -1,0 +1,132 @@
+# Splunk Application Discovery Configuration
+# ============================================
+# Copy this file and rename to config.yaml, then update with your settings
+
+# Splunk Connection Settings
+# --------------------------
+splunk_host: "splunk.company.com"       # Splunk server hostname
+splunk_port: 8089                        # Management port (default: 8089)
+
+# ============================================
+# AUTHENTICATION OPTIONS (choose one)
+# ============================================
+
+# Option 1: Token Authentication (RECOMMENDED for service accounts)
+# -----------------------------------------------------------------
+# Use a Splunk authentication token (Bearer token or Session token)
+# To create a token in Splunk:
+#   1. Go to Settings > Tokens (in Splunk Web)
+#   2. Click "New Token"
+#   3. Set audience, expiration, and permissions
+#   4. Copy the generated token value
+token: "your-splunk-token-here"
+auth_type: "token"                       # Options: 'basic', 'token', or 'auto'
+
+# Option 2: Basic Authentication (username/password)
+# ---------------------------------------------------
+# Uncomment below and comment out token/auth_type above to use basic auth
+# username: "discovery_user"
+# password: "your_password_here"
+# auth_type: "basic"
+
+use_ssl: true                            # Use HTTPS connection
+verify_ssl: false                        # Verify SSL certificates
+
+# Discovery Settings
+# ------------------
+discovery_timeframe: "-7d"               # Time range for discovery
+                                         # Options: -1h, -24h, -7d, -30d, etc.
+
+max_results: 50000                       # Max results per query
+
+# Indexes Configuration
+# ---------------------
+# Leave empty to search all indexes (except excluded)
+indexes: []
+# Or specify specific indexes:
+# indexes:
+#   - main
+#   - application_logs
+#   - security
+
+# Excluded Indexes (won't be searched)
+excluded_indexes:
+  - "_internal"
+  - "_audit"
+  - "_introspection"
+  - "_telemetry"
+  - "splunklogger"
+  - "summary"
+  - "history"
+
+# Excluded Sourcetypes
+excluded_sourcetypes:
+  - "splunkd"
+  - "splunk_*"
+  - "stash"
+  - "mongod"
+
+# Excluded App Names (common non-app terms)
+excluded_apps:
+  - "log"
+  - "logs"
+  - "tmp"
+  - "temp"
+  - "var"
+  - "etc"
+  - "debug"
+  - "info"
+  - "warn"
+  - "error"
+  - "fatal"
+  - "trace"
+  - "null"
+  - "true"
+  - "false"
+  - "server"
+  - "client"
+  - "host"
+  - "node"
+  - "test"
+  - "dev"
+  - "prod"
+  - "uat"
+
+# Validation Thresholds
+# ---------------------
+min_event_count: 100                     # Minimum events to consider valid
+confidence_threshold: 30                 # Minimum confidence score (0-100)
+
+# Output Settings
+# ---------------
+output_format: "all"                     # csv, json, excel, html, all
+output_path: "./output"                  # Directory for output files
+
+# Advanced: Custom Patterns
+# -------------------------
+# Source path patterns to extract app names
+source_patterns:
+  - '[/\\]([a-zA-Z][\w-]+)(?:\.log|\.txt|_\d)'
+  - '[/\\]logs?[/\\]([a-zA-Z][\w-]+)'
+  - 'Program Files[/\\]([^/\\]+)'
+  - '/opt/([^/]+)'
+  - '/var/log/([^/]+)'
+  - '([a-zA-Z][\w-]+)-\d+\.\d+'
+  - '/app/([^/]+)'
+
+# JSON fields that commonly contain app names
+json_app_fields:
+  - "application"
+  - "app"
+  - "appName"
+  - "app_name"
+  - "service"
+  - "serviceName"
+  - "service_name"
+  - "component"
+  - "module"
+  - "logger"
+  - "logger_name"
+  - "project"
+  - "system"
+  - "program"
