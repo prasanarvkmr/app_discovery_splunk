@@ -1,11 +1,171 @@
 import requests
-from typing import Optional, List, Generator, Dict
+from typing import Optional, List, Generator, Dict, Union, Any
 from databricks import sql
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import csv
 from datetime import datetime, timedelta
+import urllib3
+
+# Suppress InsecureRequestWarning if SSL verification is disabled
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+# SSL Configuration Options:
+# --------------------------
+# Option 1: Custom CA certificate (recommended for self-signed certs)
+#   ssl_config = {"verify": "/path/to/ca-bundle.crt"}
+#
+# Option 2: Client certificate authentication
+#   ssl_config = {
+#       "verify": "/path/to/ca-bundle.crt",  # or True for system CA
+#       "cert": ("/path/to/client.crt", "/path/to/client.key")
+#   }
+#
+# Option 3: Client cert with password-protected key
+#   ssl_config = {
+#       "verify": True,
+#       "cert": "/path/to/client.pem"  # PEM file containing cert + key
+#   }
+#
+# Option 4: Disable SSL verification (NOT recommended for production)
+#   ssl_config = {"verify": False}
+
+
+class DynatraceAPI:
+    """Generic Dynatrace API client with SSL support."""
+    
+    def __init__(self, base_url: str, api_token: str, ssl_config: dict = None):
+        """
+        Initialize Dynatrace API client.
+        
+        Args:
+            base_url: Dynatrace environment URL (e.g., https://your-env.live.dynatrace.com)
+            api_token: Dynatrace API token
+            ssl_config: SSL configuration dict:
+                - verify: True/False or path to CA bundle
+                - cert: Path to client cert or tuple (cert, key)
+        """
+        self.base_url = base_url.rstrip('/')
+        self.api_token = api_token
+        self.ssl_config = ssl_config or {}
+        
+        # SSL settings
+        self.verify = self.ssl_config.get("verify", True)
+        self.cert = self.ssl_config.get("cert")
+        
+        # Default headers
+        self.headers = {
+            "Authorization": f"Api-Token {api_token}",
+            "Content-Type": "application/json"
+        }
+    
+    def request(
+        self, 
+        method: str, 
+        endpoint: str, 
+        params: dict = None, 
+        json_data: dict = None,
+        timeout: int = 60
+    ) -> Dict[str, Any]:
+        """
+        Make a generic API request to Dynatrace.
+        
+        Args:
+            method: HTTP method (GET, POST, PUT, DELETE)
+            endpoint: API endpoint (e.g., /api/v2/entities)
+            params: Query parameters
+            json_data: JSON body for POST/PUT requests
+            timeout: Request timeout in seconds
+        
+        Returns:
+            dict with success status and response data or error
+        """
+        url = f"{self.base_url}{endpoint}"
+        
+        try:
+            response = requests.request(
+                method=method.upper(),
+                url=url,
+                headers=self.headers,
+                params=params,
+                json=json_data,
+                timeout=timeout,
+                verify=self.verify,
+                cert=self.cert
+            )
+            
+            if response.status_code in (200, 201, 204):
+                return {
+                    "success": True,
+                    "status_code": response.status_code,
+                    "data": response.json() if response.text else {}
+                }
+            else:
+                return {
+                    "success": False,
+                    "status_code": response.status_code,
+                    "error": response.text
+                }
+                
+        except requests.RequestException as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def get(self, endpoint: str, params: dict = None, timeout: int = 60) -> Dict[str, Any]:
+        """Make a GET request."""
+        return self.request("GET", endpoint, params=params, timeout=timeout)
+    
+    def post(self, endpoint: str, json_data: dict = None, params: dict = None, timeout: int = 60) -> Dict[str, Any]:
+        """Make a POST request."""
+        return self.request("POST", endpoint, params=params, json_data=json_data, timeout=timeout)
+    
+    def put(self, endpoint: str, json_data: dict = None, params: dict = None, timeout: int = 60) -> Dict[str, Any]:
+        """Make a PUT request."""
+        return self.request("PUT", endpoint, params=params, json_data=json_data, timeout=timeout)
+    
+    def delete(self, endpoint: str, params: dict = None, timeout: int = 60) -> Dict[str, Any]:
+        """Make a DELETE request."""
+        return self.request("DELETE", endpoint, params=params, timeout=timeout)
+    
+    # Convenience methods for common operations
+    def get_entities(self, entity_selector: str, fields: str = "+properties", page_size: int = 500) -> Dict[str, Any]:
+        """Get entities with selector."""
+        return self.get("/api/v2/entities", params={
+            "entitySelector": entity_selector,
+            "fields": fields,
+            "pageSize": page_size
+        })
+    
+    def get_entity(self, entity_id: str, fields: str = "+properties") -> Dict[str, Any]:
+        """Get single entity by ID."""
+        return self.get(f"/api/v2/entities/{entity_id}", params={"fields": fields})
+    
+    def get_metrics(self, metric_selector: str, entity_selector: str = None, 
+                    time_from: str = "now-1h", resolution: str = "1h") -> Dict[str, Any]:
+        """Query metrics."""
+        params = {
+            "metricSelector": metric_selector,
+            "from": time_from,
+            "resolution": resolution
+        }
+        if entity_selector:
+            params["entitySelector"] = entity_selector
+        return self.get("/api/v2/metrics/query", params=params)
+    
+    def get_problems(self, entity_selector: str = None, time_from: str = "now-24h", 
+                     problem_selector: str = 'status("OPEN")') -> Dict[str, Any]:
+        """Get problems."""
+        params = {
+            "from": time_from,
+            "problemSelector": problem_selector
+        }
+        if entity_selector:
+            params["entitySelector"] = entity_selector
+        return self.get("/api/v2/problems", params=params)
 
 
 # Dynatrace metric IDs for host health
@@ -26,8 +186,7 @@ HOST_METRICS = {
 
 
 def get_host_metrics(
-    dynatrace_url: str,
-    api_token: str,
+    dt_client: DynatraceAPI,
     entity_ids: List[str],
     time_range: str = "now-1h"
 ) -> Dict[str, dict]:
@@ -35,22 +194,13 @@ def get_host_metrics(
     Fetch health metrics for multiple hosts from Dynatrace Metrics API v2.
     
     Args:
-        dynatrace_url: Dynatrace environment URL
-        api_token: Dynatrace API token with metrics.read scope
+        dt_client: DynatraceAPI client instance
         entity_ids: List of host entity IDs (HOST-XXXXX)
         time_range: Time range for metrics (default: last 1 hour)
     
     Returns:
         Dict mapping entity_id to metrics
     """
-    headers = {
-        "Authorization": f"Api-Token {api_token}",
-        "Content-Type": "application/json"
-    }
-    
-    base_url = dynatrace_url.rstrip('/')
-    endpoint = f"{base_url}/api/v2/metrics/query"
-    
     # Build entity selector for multiple hosts
     entity_selector = ",".join([f'entityId("{eid}")' for eid in entity_ids])
     
@@ -58,228 +208,304 @@ def get_host_metrics(
     
     # Query each metric
     for metric_name, metric_id in HOST_METRICS.items():
-        params = {
-            "metricSelector": f"{metric_id}:avg",
-            "entitySelector": f"type(HOST),({entity_selector})",
-            "from": time_range,
-            "resolution": "1h"
-        }
+        result = dt_client.get_metrics(
+            metric_selector=f"{metric_id}:avg",
+            entity_selector=f"type(HOST),({entity_selector})",
+            time_from=time_range,
+            resolution="1h"
+        )
         
-        try:
-            response = requests.get(endpoint, headers=headers, params=params, timeout=60)
-            
-            if response.status_code == 200:
-                data = response.json()
-                for result in data.get("result", []):
-                    for series in result.get("data", []):
-                        dimensions = series.get("dimensions", [])
-                        if dimensions:
-                            host_id = dimensions[0]
-                            values = series.get("values", [])
-                            # Get the latest non-null value
-                            value = None
-                            for v in reversed(values):
-                                if v is not None:
-                                    value = round(v, 2) if isinstance(v, float) else v
-                                    break
-                            if host_id in metrics_data:
-                                metrics_data[host_id][metric_name] = value
-        except requests.RequestException as e:
-            print(f"Warning: Failed to fetch {metric_name}: {e}")
+        if result.get("success"):
+            data = result.get("data", {})
+            for res in data.get("result", []):
+                for series in res.get("data", []):
+                    dimensions = series.get("dimensions", [])
+                    if dimensions:
+                        host_id = dimensions[0]
+                        values = series.get("values", [])
+                        # Get the latest non-null value
+                        value = None
+                        for v in reversed(values):
+                            if v is not None:
+                                value = round(v, 2) if isinstance(v, float) else v
+                                break
+                        if host_id in metrics_data:
+                            metrics_data[host_id][metric_name] = value
+        else:
+            print(f"Warning: Failed to fetch {metric_name}: {result.get('error')}")
     
     return metrics_data
 
 
 def get_host_health_state(
-    dynatrace_url: str,
-    api_token: str,
+    dt_client: DynatraceAPI,
     entity_ids: List[str]
 ) -> Dict[str, dict]:
     """
     Get host health state and problems from Dynatrace.
     
     Args:
-        dynatrace_url: Dynatrace environment URL
-        api_token: Dynatrace API token
+        dt_client: DynatraceAPI client instance
         entity_ids: List of host entity IDs
     
     Returns:
         Dict mapping entity_id to health state
     """
-    headers = {
-        "Authorization": f"Api-Token {api_token}",
-        "Content-Type": "application/json"
-    }
-    
-    base_url = dynatrace_url.rstrip('/')
     health_data = {}
     
-    # Get problems for these hosts
-    endpoint = f"{base_url}/api/v2/problems"
-    
     for entity_id in entity_ids:
-        params = {
-            "entitySelector": f'entityId("{entity_id}")',
-            "from": "now-24h",
-            "problemSelector": 'status("OPEN")'
-        }
+        result = dt_client.get_problems(
+            entity_selector=f'entityId("{entity_id}")',
+            time_from="now-24h",
+            problem_selector='status("OPEN")'
+        )
         
-        try:
-            response = requests.get(endpoint, headers=headers, params=params, timeout=30)
+        if result.get("success"):
+            problems = result.get("data", {}).get("problems", [])
             
-            if response.status_code == 200:
-                data = response.json()
-                problems = data.get("problems", [])
-                
-                # Determine health state based on problem severity
-                if not problems:
-                    health_state = "HEALTHY"
-                    severity = "NONE"
-                else:
-                    severities = [p.get("severityLevel", "").upper() for p in problems]
-                    if "ERROR" in severities or "AVAILABILITY" in severities:
-                        health_state = "CRITICAL"
-                        severity = "ERROR"
-                    elif "PERFORMANCE" in severities or "RESOURCE_CONTENTION" in severities:
-                        health_state = "WARNING"
-                        severity = "PERFORMANCE"
-                    else:
-                        health_state = "WARNING"
-                        severity = severities[0] if severities else "UNKNOWN"
-                
-                health_data[entity_id] = {
-                    "health_state": health_state,
-                    "open_problems": len(problems),
-                    "highest_severity": severity,
-                    "problem_titles": "; ".join([p.get("title", "") for p in problems[:3]])
-                }
+            # Determine health state based on problem severity
+            if not problems:
+                health_state = "HEALTHY"
+                severity = "NONE"
             else:
-                health_data[entity_id] = {
-                    "health_state": "UNKNOWN",
-                    "open_problems": 0,
-                    "highest_severity": "UNKNOWN",
-                    "problem_titles": ""
-                }
-        except requests.RequestException:
+                severities = [p.get("severityLevel", "").upper() for p in problems]
+                if "ERROR" in severities or "AVAILABILITY" in severities:
+                    health_state = "CRITICAL"
+                    severity = "ERROR"
+                elif "PERFORMANCE" in severities or "RESOURCE_CONTENTION" in severities:
+                    health_state = "WARNING"
+                    severity = "PERFORMANCE"
+                else:
+                    health_state = "WARNING"
+                    severity = severities[0] if severities else "UNKNOWN"
+            
             health_data[entity_id] = {
-                "health_state": "ERROR",
+                "health_state": health_state,
+                "open_problems": len(problems),
+                "highest_severity": severity,
+                "problem_titles": "; ".join([p.get("title", "") for p in problems[:3]])
+            }
+        else:
+            health_data[entity_id] = {
+                "health_state": "UNKNOWN",
                 "open_problems": 0,
-                "highest_severity": "ERROR",
-                "problem_titles": "Failed to fetch"
+                "highest_severity": "UNKNOWN",
+                "problem_titles": result.get("error", "")
             }
     
     return health_data
+
+
+def get_oneagent_info(entity: dict) -> dict:
+    """
+    Extract OneAgent installation status and version from host entity.
+    
+    Args:
+        entity: Host entity dict from Dynatrace API
+    
+    Returns:
+        dict with OneAgent details
+    """
+    properties = entity.get("properties", {})
+    
+    agent_version = properties.get("agentVersion", "")
+    monitoring_mode = properties.get("monitoringMode", "")
+    state = properties.get("state", "")
+    
+    # Determine if OneAgent is installed
+    has_oneagent = bool(agent_version) or monitoring_mode in ("FULL_STACK", "INFRASTRUCTURE_ONLY")
+    
+    return {
+        "oneagent_installed": has_oneagent,
+        "oneagent_version": agent_version,
+        "oneagent_monitoring_mode": monitoring_mode,
+        "oneagent_state": state,
+        "oneagent_running": state == "RUNNING",
+        "oneagent_auto_update": properties.get("autoUpdate", ""),
+        "oneagent_update_status": properties.get("updateStatus", ""),
+    }
+
+
+def check_oneagent_status(dt_client: 'DynatraceAPI', host_id: str) -> dict:
+    """
+    Check if OneAgent is installed on a specific host and get version details.
+    
+    Args:
+        dt_client: DynatraceAPI client instance
+        host_id: Dynatrace host entity ID (HOST-XXXXX)
+    
+    Returns:
+        dict with OneAgent status and version info
+    """
+    result = dt_client.get_entity(host_id, fields="+properties")
+    
+    if result.get("success"):
+        entity = result.get("data", {})
+        return {
+            "success": True,
+            "host_id": host_id,
+            "display_name": entity.get("displayName", ""),
+            **get_oneagent_info(entity)
+        }
+    else:
+        return {
+            "success": False,
+            "host_id": host_id,
+            "error": result.get("error"),
+            "status_code": result.get("status_code")
+        }
+
+
+def check_oneagent_status_batch(dt_client: 'DynatraceAPI', hostnames: List[str] = None, entity_ids: List[str] = None) -> List[dict]:
+    """
+    Check OneAgent status for multiple hosts.
+    
+    Args:
+        dt_client: DynatraceAPI client instance
+        hostnames: List of hostnames to check (optional)
+        entity_ids: List of entity IDs to check (optional)
+    
+    Returns:
+        List of dicts with OneAgent status for each host
+    """
+    results = []
+    
+    if entity_ids:
+        # Direct lookup by entity IDs
+        for entity_id in entity_ids:
+            results.append(check_oneagent_status(dt_client, entity_id))
+    elif hostnames:
+        # Search by hostname first
+        host_conditions = ",".join([f'entityName.equals("{h}")' for h in hostnames])
+        entity_selector = f'type("HOST"),({host_conditions})'
+        
+        search_result = dt_client.get_entities(entity_selector, fields="+properties")
+        
+        if search_result.get("success"):
+            entities = search_result.get("data", {}).get("entities", [])
+            found_hosts = {e.get("displayName", "").lower(): e for e in entities}
+            
+            for hostname in hostnames:
+                if hostname.lower() in found_hosts:
+                    entity = found_hosts[hostname.lower()]
+                    results.append({
+                        "success": True,
+                        "hostname": hostname,
+                        "host_id": entity.get("entityId", ""),
+                        "display_name": entity.get("displayName", ""),
+                        "found_in_dynatrace": True,
+                        **get_oneagent_info(entity)
+                    })
+                else:
+                    results.append({
+                        "success": True,
+                        "hostname": hostname,
+                        "found_in_dynatrace": False,
+                        "oneagent_installed": False,
+                        "oneagent_version": "",
+                        "oneagent_state": ""
+                    })
+        else:
+            for hostname in hostnames:
+                results.append({
+                    "success": False,
+                    "hostname": hostname,
+                    "error": search_result.get("error")
+                })
+    
+    return results
 
 
 def get_host_properties(entity: dict) -> dict:
     """Extract key properties from host entity."""
     properties = entity.get("properties", {})
     
+    # Get OneAgent info (includes monitoring_mode, agent_version, state)
+    oneagent_info = get_oneagent_info(entity)
+    
     return {
+        # System info
         "os_type": properties.get("osType", ""),
         "os_version": properties.get("osVersion", ""),
         "os_architecture": properties.get("osArchitecture", ""),
         "hypervisor_type": properties.get("hypervisorType", ""),
+        # Cloud info
         "cloud_type": properties.get("cloudType", ""),
         "cloud_provider": properties.get("cloudProvider", ""),
         "aws_instance_type": properties.get("awsInstanceType", ""),
         "azure_vm_size": properties.get("azureVmSize", ""),
+        # Hardware
         "cpu_cores": properties.get("cpuCores", ""),
         "physical_memory_gb": round(properties.get("physicalMemory", 0) / (1024**3), 2) if properties.get("physicalMemory") else "",
         "ip_addresses": "; ".join(properties.get("ipAddress", [])) if properties.get("ipAddress") else "",
-        "monitoring_mode": properties.get("monitoringMode", ""),
-        "agent_version": properties.get("agentVersion", ""),
-        "is_monitored": properties.get("state", "") == "RUNNING"
+        # OneAgent details (no duplicates)
+        **oneagent_info
     }
 
 
 def check_hosts_batch_with_metrics(
-    dynatrace_url: str,
-    api_token: str,
+    dt_client: DynatraceAPI,
     hostnames: List[str]
 ) -> dict:
     """
     Check multiple hosts and fetch their metrics.
     
     Args:
-        dynatrace_url: Dynatrace environment URL
-        api_token: Dynatrace API token
+        dt_client: DynatraceAPI client instance
         hostnames: List of hostnames to check
     
     Returns:
-        dict with found hosts including metrics, and not_found hosts
+        dict with hosts list (each has found_in_dynatrace flag)
     """
-    headers = {
-        "Authorization": f"Api-Token {api_token}",
-        "Content-Type": "application/json"
-    }
-    
-    base_url = dynatrace_url.rstrip('/')
-    endpoint = f"{base_url}/api/v2/entities"
-    
     # Build entity selector for multiple hosts
     host_conditions = ",".join([f'entityName.equals("{h}")' for h in hostnames])
     entity_selector = f'type("HOST"),({host_conditions})'
     
-    params = {
-        "entitySelector": entity_selector,
-        "fields": "+properties",
-        "pageSize": 500
-    }
+    result = dt_client.get_entities(entity_selector, fields="+properties")
     
-    try:
-        response = requests.get(endpoint, headers=headers, params=params, timeout=60)
+    if result.get("success"):
+        entities = result.get("data", {}).get("entities", [])
+        found_hosts_map = {e.get("displayName", "").lower(): e for e in entities}
         
-        if response.status_code == 200:
-            data = response.json()
-            entities = data.get("entities", [])
-            found_hosts_map = {e.get("displayName", "").lower(): e for e in entities}
-            
-            results = {
-                "found": [],
-                "not_found": []
-            }
-            
-            # Get entity IDs for metrics query
-            entity_ids = [e.get("entityId") for e in entities if e.get("entityId")]
-            
-            # Fetch metrics for all found hosts
-            metrics_data = {}
-            health_data = {}
-            
-            if entity_ids:
-                print(f"    Fetching metrics for {len(entity_ids)} hosts...")
-                metrics_data = get_host_metrics(dynatrace_url, api_token, entity_ids)
-                health_data = get_host_health_state(dynatrace_url, api_token, entity_ids)
-            
-            for hostname in hostnames:
-                if hostname.lower() in found_hosts_map:
-                    entity = found_hosts_map[hostname.lower()]
-                    entity_id = entity.get("entityId", "")
-                    
-                    # Combine all data
-                    host_result = {
-                        "hostname": hostname,
-                        "entity_id": entity_id,
-                        "display_name": entity.get("displayName", ""),
-                        "found_in_dynatrace": True,
-                        **get_host_properties(entity),
-                        **metrics_data.get(entity_id, {}),
-                        **health_data.get(entity_id, {})
-                    }
-                    results["found"].append(host_result)
-                else:
-                    results["not_found"].append({
-                        "hostname": hostname,
-                        "found_in_dynatrace": False
-                    })
-            
-            return results
-        else:
-            return {"error": response.text, "status_code": response.status_code}
-            
-    except requests.RequestException as e:
-        return {"error": str(e)}
+        hosts = []
+        
+        # Get entity IDs for metrics query
+        entity_ids = [e.get("entityId") for e in entities if e.get("entityId")]
+        
+        # Fetch metrics for all found hosts
+        metrics_data = {}
+        health_data = {}
+        
+        if entity_ids:
+            print(f"    Fetching metrics for {len(entity_ids)} hosts...")
+            metrics_data = get_host_metrics(dt_client, entity_ids)
+            health_data = get_host_health_state(dt_client, entity_ids)
+        
+        for hostname in hostnames:
+            if hostname.lower() in found_hosts_map:
+                entity = found_hosts_map[hostname.lower()]
+                entity_id = entity.get("entityId", "")
+                
+                # Combine all data for found host
+                hosts.append({
+                    "hostname": hostname,
+                    "entity_id": entity_id,
+                    "display_name": entity.get("displayName", ""),
+                    "found_in_dynatrace": True,
+                    **get_host_properties(entity),
+                    **metrics_data.get(entity_id, {}),
+                    **health_data.get(entity_id, {})
+                })
+            else:
+                # Not found host
+                hosts.append({
+                    "hostname": hostname,
+                    "found_in_dynatrace": False
+                })
+        
+        return {"hosts": hosts}
+    else:
+        return {"error": result.get("error"), "status_code": result.get("status_code")}
 
 
 def read_hosts_from_databricks(
@@ -324,6 +550,9 @@ def read_hosts_from_databricks(
                 rows = cursor.fetchall()
                 hosts = [row[0] for row in rows if row[0]]
                 
+                # Remove duplicates within chunk (preserve order)
+                hosts = list(dict.fromkeys(hosts))
+                
                 if hosts:
                     yield hosts
                 
@@ -364,7 +593,8 @@ def process_hosts_from_databricks(
     databricks_config: dict,
     dynatrace_config: dict,
     chunk_size: int = 50,
-    output_csv: str = None
+    output_csv: str = None,
+    ssl_config: dict = None
 ) -> dict:
     """
     Main function to read hosts from Databricks, check in Dynatrace, and export to CSV.
@@ -374,13 +604,21 @@ def process_hosts_from_databricks(
         dynatrace_config: Dict with url, api_token
         chunk_size: Number of hosts to process per batch
         output_csv: Path to output CSV file (optional, will also return results)
+        ssl_config: SSL configuration dict (verify, cert) for Dynatrace API
     
     Returns:
-        dict with all results
+        dict with hosts list and summary counts
     """
-    all_found = []
-    all_not_found = []
+    all_hosts = []
     errors = []
+    seen_hostnames = set()  # Track processed hostnames to avoid duplicates
+    
+    # Create Dynatrace API client with SSL config
+    dt_client = DynatraceAPI(
+        base_url=dynatrace_config["url"],
+        api_token=dynatrace_config["api_token"],
+        ssl_config=ssl_config
+    )
     
     print("Reading hosts from Databricks...")
     
@@ -393,29 +631,38 @@ def process_hosts_from_databricks(
         host_column=databricks_config.get("host_column", "hostname"),
         chunk_size=chunk_size
     ):
-        print(f"Checking batch of {len(host_chunk)} hosts in Dynatrace...")
+        # Dedupe: only process hostnames not seen before
+        unique_chunk = [h for h in host_chunk if h.lower() not in seen_hostnames]
+        seen_hostnames.update(h.lower() for h in unique_chunk)
+        
+        if not unique_chunk:
+            print(f"  Skipping batch - all {len(host_chunk)} hosts already processed")
+            continue
+        
+        print(f"Checking batch of {len(unique_chunk)} hosts in Dynatrace...")
         
         # Check this chunk in Dynatrace with metrics
         result = check_hosts_batch_with_metrics(
-            dynatrace_url=dynatrace_config["url"],
-            api_token=dynatrace_config["api_token"],
-            hostnames=host_chunk
+            dt_client=dt_client,
+            hostnames=unique_chunk
         )
         
         if "error" in result:
             errors.append(result)
         else:
-            all_found.extend(result.get("found", []))
-            all_not_found.extend(result.get("not_found", []))
+            all_hosts.extend(result.get("hosts", []))
         
         # Rate limiting - avoid hitting API too hard
         time.sleep(1)
     
+    # Calculate counts from single hosts array
+    total_found = sum(1 for h in all_hosts if h.get("found_in_dynatrace"))
+    total_not_found = len(all_hosts) - total_found
+    
     results = {
-        "total_found": len(all_found),
-        "total_not_found": len(all_not_found),
-        "found_hosts": all_found,
-        "not_found_hosts": all_not_found,
+        "hosts": all_hosts,
+        "total_found": total_found,
+        "total_not_found": total_not_found,
         "errors": errors
     }
     
@@ -436,28 +683,40 @@ def export_results_to_csv(results: dict, output_prefix: str = "dynatrace_hosts")
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Define CSV columns for found hosts
-    found_columns = [
+    # Define CSV columns - all hosts in one file (no duplicates)
+    columns = [
+        # Identity
         "hostname",
         "found_in_dynatrace",
         "entity_id",
         "display_name",
+        # Health
         "health_state",
         "open_problems",
         "highest_severity",
         "problem_titles",
+        # OneAgent status
+        "oneagent_installed",
+        "oneagent_running",
+        "oneagent_version",
+        "oneagent_monitoring_mode",
+        "oneagent_state",
+        "oneagent_auto_update",
+        "oneagent_update_status",
+        # Resource metrics
         "cpu_usage",
+        "memory_usage",
+        "disk_usage",
+        "host_availability",
         "cpu_system",
         "cpu_user",
         "cpu_idle",
-        "memory_usage",
         "memory_available",
-        "disk_usage",
         "disk_read_throughput",
         "disk_write_throughput",
         "network_in",
         "network_out",
-        "host_availability",
+        # System info
         "os_type",
         "os_version",
         "os_architecture",
@@ -468,42 +727,34 @@ def export_results_to_csv(results: dict, output_prefix: str = "dynatrace_hosts")
         "cpu_cores",
         "physical_memory_gb",
         "ip_addresses",
-        "monitoring_mode",
-        "agent_version",
-        "is_monitored"
     ]
     
-    # Export found hosts with metrics
-    found_file = f"{output_prefix}_found_{timestamp}.csv"
-    with open(found_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=found_columns, extrasaction='ignore')
-        writer.writeheader()
-        for host in results.get("found_hosts", []):
-            writer.writerow(host)
-    print(f"Found hosts exported to: {found_file}")
+    # Get hosts and sort by hostname
+    hosts = results.get("hosts", [])
+    hosts.sort(key=lambda x: x.get("hostname", "").lower())
     
-    # Export not found hosts
-    not_found_file = f"{output_prefix}_not_found_{timestamp}.csv"
-    with open(not_found_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=["hostname", "found_in_dynatrace"], extrasaction='ignore')
+    # Export all hosts to single CSV
+    hosts_file = f"{output_prefix}_{timestamp}.csv"
+    with open(hosts_file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=columns, extrasaction='ignore')
         writer.writeheader()
-        for host in results.get("not_found_hosts", []):
+        for host in hosts:
             writer.writerow(host)
-    print(f"Not found hosts exported to: {not_found_file}")
+    print(f"All hosts exported to: {hosts_file}")
     
     # Export summary
     summary_file = f"{output_prefix}_summary_{timestamp}.csv"
     with open(summary_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(["Metric", "Value"])
-        writer.writerow(["Total Hosts Checked", results.get("total_found", 0) + results.get("total_not_found", 0)])
+        writer.writerow(["Total Hosts Checked", len(hosts)])
         writer.writerow(["Hosts Found in Dynatrace", results.get("total_found", 0)])
         writer.writerow(["Hosts Not Found", results.get("total_not_found", 0)])
         writer.writerow(["Errors", len(results.get("errors", []))])
         writer.writerow(["Timestamp", timestamp])
         
-        # Health summary
-        found_hosts = results.get("found_hosts", [])
+        # Health summary (only for hosts found in Dynatrace)
+        found_hosts = [h for h in hosts if h.get("found_in_dynatrace")]
         if found_hosts:
             healthy = sum(1 for h in found_hosts if h.get("health_state") == "HEALTHY")
             warning = sum(1 for h in found_hosts if h.get("health_state") == "WARNING")
@@ -513,6 +764,30 @@ def export_results_to_csv(results: dict, output_prefix: str = "dynatrace_hosts")
             writer.writerow(["Healthy Hosts", healthy])
             writer.writerow(["Warning Hosts", warning])
             writer.writerow(["Critical Hosts", critical])
+            
+            # OneAgent summary
+            with_agent = sum(1 for h in found_hosts if h.get("oneagent_installed"))
+            without_agent = sum(1 for h in found_hosts if not h.get("oneagent_installed"))
+            agent_running = sum(1 for h in found_hosts if h.get("oneagent_running"))
+            agent_not_running = sum(1 for h in found_hosts if h.get("oneagent_installed") and not h.get("oneagent_running"))
+            
+            # Get unique versions
+            versions = {}
+            for h in found_hosts:
+                ver = h.get("oneagent_version", "")
+                if ver:
+                    versions[ver] = versions.get(ver, 0) + 1
+            
+            writer.writerow([""])
+            writer.writerow(["OneAgent Summary", ""])
+            writer.writerow(["Hosts with OneAgent", with_agent])
+            writer.writerow(["Hosts without OneAgent", without_agent])
+            writer.writerow(["OneAgent Running", agent_running])
+            writer.writerow(["OneAgent Not Running", agent_not_running])
+            writer.writerow([""])
+            writer.writerow(["OneAgent Version Distribution", ""])
+            for ver, count in sorted(versions.items(), key=lambda x: -x[1]):
+                writer.writerow([f"  {ver}", count])
             
             # Average metrics
             cpu_values = [h.get("cpu_usage") for h in found_hosts if h.get("cpu_usage") is not None]
@@ -531,15 +806,13 @@ def export_results_to_csv(results: dict, output_prefix: str = "dynatrace_hosts")
     print(f"Summary exported to: {summary_file}")
     
     return {
-        "found_file": found_file,
-        "not_found_file": not_found_file,
+        "hosts_file": hosts_file,
         "summary_file": summary_file
     }
 
 
 def check_host_in_dynatrace(
-    dynatrace_url: str,
-    api_token: str,
+    dt_client: DynatraceAPI,
     host_name: Optional[str] = None,
     host_id: Optional[str] = None
 ) -> dict:
@@ -547,102 +820,64 @@ def check_host_in_dynatrace(
     Check if host details are available in Dynatrace API v2.
     
     Args:
-        dynatrace_url: Dynatrace environment URL (e.g., https://your-env.live.dynatrace.com)
-        api_token: Dynatrace API token with entities.read scope
+        dt_client: DynatraceAPI client instance
         host_name: Host name to search for (optional)
         host_id: Dynatrace entity ID (e.g., HOST-XXXXXXXXXX) (optional)
     
     Returns:
         dict with status and host details
     """
-    headers = {
-        "Authorization": f"Api-Token {api_token}",
-        "Content-Type": "application/json"
-    }
-    
-    base_url = dynatrace_url.rstrip('/')
-    
     # If specific host ID is provided, fetch directly
     if host_id:
-        endpoint = f"{base_url}/api/v2/entities/{host_id}"
-        try:
-            response = requests.get(endpoint, headers=headers, timeout=30)
-            if response.status_code == 200:
-                return {"found": True, "host": response.json()}
-            elif response.status_code == 404:
-                return {"found": False, "message": f"Host {host_id} not found"}
-            else:
-                return {"found": False, "error": response.text, "status_code": response.status_code}
-        except requests.RequestException as e:
-            return {"found": False, "error": str(e)}
+        result = dt_client.get_entity(host_id)
+        if result.get("success"):
+            return {"found": True, "host": result.get("data")}
+        elif result.get("status_code") == 404:
+            return {"found": False, "message": f"Host {host_id} not found"}
+        else:
+            return {"found": False, "error": result.get("error"), "status_code": result.get("status_code")}
     
     # Search by host name using entity selector
-    endpoint = f"{base_url}/api/v2/entities"
-    params = {
-        "entitySelector": 'type("HOST")',
-        "fields": "+properties,+toRelationships,+fromRelationships",
-        "pageSize": 500
-    }
-    
+    entity_selector = 'type("HOST")'
     if host_name:
-        params["entitySelector"] = f'type("HOST"),entityName.contains("{host_name}")'
+        entity_selector = f'type("HOST"),entityName.contains("{host_name}")'
     
-    try:
-        response = requests.get(endpoint, headers=headers, params=params, timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
-            entities = data.get("entities", [])
-            
-            if entities:
-                return {
-                    "found": True,
-                    "count": len(entities),
-                    "hosts": entities
-                }
-            else:
-                return {"found": False, "message": "No hosts found matching criteria"}
+    result = dt_client.get_entities(entity_selector, fields="+properties,+toRelationships,+fromRelationships")
+    
+    if result.get("success"):
+        entities = result.get("data", {}).get("entities", [])
+        if entities:
+            return {
+                "found": True,
+                "count": len(entities),
+                "hosts": entities
+            }
         else:
-            return {"found": False, "error": response.text, "status_code": response.status_code}
-            
-    except requests.RequestException as e:
-        return {"found": False, "error": str(e)}
+            return {"found": False, "message": "No hosts found matching criteria"}
+    else:
+        return {"found": False, "error": result.get("error"), "status_code": result.get("status_code")}
 
 
-def get_host_details(dynatrace_url: str, api_token: str, host_id: str) -> dict:
+def get_host_details(dt_client: DynatraceAPI, host_id: str) -> dict:
     """
     Get detailed information about a specific host.
     
     Args:
-        dynatrace_url: Dynatrace environment URL
-        api_token: Dynatrace API token
+        dt_client: DynatraceAPI client instance
         host_id: Dynatrace host entity ID
     
     Returns:
         dict with host details
     """
-    headers = {
-        "Authorization": f"Api-Token {api_token}",
-        "Content-Type": "application/json"
-    }
+    result = dt_client.get(
+        f"/api/v2/entities/{host_id}",
+        params={"fields": "+properties,+toRelationships,+fromRelationships"}
+    )
     
-    base_url = dynatrace_url.rstrip('/')
-    endpoint = f"{base_url}/api/v2/entities/{host_id}"
-    
-    params = {
-        "fields": "+properties,+toRelationships,+fromRelationships"
-    }
-    
-    try:
-        response = requests.get(endpoint, headers=headers, params=params, timeout=30)
-        
-        if response.status_code == 200:
-            return {"success": True, "data": response.json()}
-        else:
-            return {"success": False, "error": response.text, "status_code": response.status_code}
-            
-    except requests.RequestException as e:
-        return {"success": False, "error": str(e)}
+    if result.get("success"):
+        return {"success": True, "data": result.get("data")}
+    else:
+        return {"success": False, "error": result.get("error"), "status_code": result.get("status_code")}
 
 
 if __name__ == "__main__":
@@ -665,6 +900,34 @@ if __name__ == "__main__":
         "api_token": "dt0c01.XXXXXXXX.YYYYYYYY"  # Token with entities.read and metrics.read scope
     }
     
+    # ===========================================
+    # SSL CERTIFICATE CONFIGURATION
+    # ===========================================
+    # Choose ONE of the following options:
+    
+    # Option 1: Use system CA certificates (default - no SSL config needed)
+    SSL_CONFIG = None
+    
+    # Option 2: Custom CA certificate (for self-signed or internal CA)
+    # SSL_CONFIG = {
+    #     "verify": "/path/to/ca-bundle.crt"  # Path to CA certificate bundle
+    # }
+    
+    # Option 3: Client certificate authentication (mTLS)
+    # SSL_CONFIG = {
+    #     "verify": "/path/to/ca-bundle.crt",  # CA to verify server, or True for system CA
+    #     "cert": ("/path/to/client.crt", "/path/to/client.key")  # Client cert and key
+    # }
+    
+    # Option 4: Client certificate with combined PEM file
+    # SSL_CONFIG = {
+    #     "verify": True,
+    #     "cert": "/path/to/client.pem"  # PEM file containing both cert and key
+    # }
+    
+    # Option 5: Disable SSL verification (NOT RECOMMENDED for production!)
+    # SSL_CONFIG = {"verify": False}
+    
     # Processing Configuration
     CHUNK_SIZE = 50  # Number of hosts per batch
     OUTPUT_PREFIX = "output/dynatrace_hosts"  # CSV output prefix
@@ -681,7 +944,8 @@ if __name__ == "__main__":
         databricks_config=DATABRICKS_CONFIG,
         dynatrace_config=DYNATRACE_CONFIG,
         chunk_size=CHUNK_SIZE,
-        output_csv=OUTPUT_PREFIX
+        output_csv=OUTPUT_PREFIX,
+        ssl_config=SSL_CONFIG
     )
     
     print("\n" + "=" * 60)
