@@ -508,16 +508,15 @@ def check_hosts_batch_with_metrics(
         return {"error": result.get("error"), "status_code": result.get("status_code")}
 
 
-def read_hosts_from_databricks(
+def read_all_hosts_from_databricks(
     server_hostname: str,
     http_path: str,
     access_token: str,
     table_name: str,
-    host_column: str = "hostname",
-    chunk_size: int = 100
-) -> Generator[List[str], None, None]:
+    host_column: str = "hostname"
+) -> List[str]:
     """
-    Read host list from Databricks table in chunks.
+    Read all hostnames from Databricks table in a single query.
     
     Args:
         server_hostname: Databricks workspace hostname (e.g., adb-xxx.azuredatabricks.net)
@@ -525,10 +524,9 @@ def read_hosts_from_databricks(
         access_token: Databricks personal access token
         table_name: Full table name (catalog.schema.table)
         host_column: Column name containing hostnames
-        chunk_size: Number of hosts per chunk
     
-    Yields:
-        List of hostnames in chunks
+    Returns:
+        List of all hostnames (with duplicates removed)
     """
     with sql.connect(
         server_hostname=server_hostname,
@@ -536,28 +534,12 @@ def read_hosts_from_databricks(
         access_token=access_token
     ) as connection:
         with connection.cursor() as cursor:
-            # Get total count first
-            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-            total_count = cursor.fetchone()[0]
-            print(f"Total hosts in table: {total_count}")
-            
-            # Fetch in chunks using OFFSET/LIMIT
-            offset = 0
-            while offset < total_count:
-                cursor.execute(
-                    f"SELECT {host_column} FROM {table_name} LIMIT {chunk_size} OFFSET {offset}"
-                )
-                rows = cursor.fetchall()
-                hosts = [row[0] for row in rows if row[0]]
-                
-                # Remove duplicates within chunk (preserve order)
-                hosts = list(dict.fromkeys(hosts))
-                
-                if hosts:
-                    yield hosts
-                
-                offset += chunk_size
-                print(f"Processed {min(offset, total_count)}/{total_count} hosts")
+            print(f"Loading all hosts from {table_name}...")
+            cursor.execute(f"SELECT DISTINCT {host_column} FROM {table_name} WHERE {host_column} IS NOT NULL")
+            rows = cursor.fetchall()
+            hosts = [row[0].strip() for row in rows if row[0] and row[0].strip()]
+            print(f"Loaded {len(hosts)} unique hostnames from Databricks")
+            return hosts
 
 
 def read_hosts_from_databricks_df(
@@ -611,7 +593,6 @@ def process_hosts_from_databricks(
     """
     all_hosts = []
     errors = []
-    seen_hostnames = set()  # Track processed hostnames to avoid duplicates
     
     # Create Dynatrace API client with SSL config
     dt_client = DynatraceAPI(
@@ -620,31 +601,36 @@ def process_hosts_from_databricks(
         ssl_config=ssl_config
     )
     
+    # Step 1: Load ALL hostnames from Databricks at once
     print("Reading hosts from Databricks...")
-    
-    # Read hosts in chunks from Databricks
-    for host_chunk in read_hosts_from_databricks(
+    all_hostnames = read_all_hosts_from_databricks(
         server_hostname=databricks_config["server_hostname"],
         http_path=databricks_config["http_path"],
         access_token=databricks_config["access_token"],
         table_name=databricks_config["table_name"],
-        host_column=databricks_config.get("host_column", "hostname"),
-        chunk_size=chunk_size
-    ):
-        # Dedupe: only process hostnames not seen before
-        unique_chunk = [h for h in host_chunk if h.lower() not in seen_hostnames]
-        seen_hostnames.update(h.lower() for h in unique_chunk)
-        
-        if not unique_chunk:
-            print(f"  Skipping batch - all {len(host_chunk)} hosts already processed")
-            continue
-        
-        print(f"Checking batch of {len(unique_chunk)} hosts in Dynatrace...")
+        host_column=databricks_config.get("host_column", "hostname")
+    )
+    
+    # Step 2: Dedupe (case-insensitive) - preserve first occurrence
+    seen = set()
+    unique_hostnames = []
+    for h in all_hostnames:
+        if h.lower() not in seen:
+            seen.add(h.lower())
+            unique_hostnames.append(h)
+    
+    print(f"Total hostnames: {len(all_hostnames)}, Unique: {len(unique_hostnames)}")
+    
+    # Step 3: Chunk for Dynatrace API calls
+    total_chunks = (len(unique_hostnames) + chunk_size - 1) // chunk_size
+    
+    for i, host_chunk in enumerate(chunk_list(unique_hostnames, chunk_size), 1):
+        print(f"Checking batch {i}/{total_chunks} ({len(host_chunk)} hosts) in Dynatrace...")
         
         # Check this chunk in Dynatrace with metrics
         result = check_hosts_batch_with_metrics(
             dt_client=dt_client,
-            hostnames=unique_chunk
+            hostnames=host_chunk
         )
         
         if "error" in result:

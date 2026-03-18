@@ -1,0 +1,49 @@
+{
+    "name": "genesys_call_quality_pipeline",
+    "description": "Genesys Call Quality — ELK API to Unity Catalog (Bronze → Silver → Gold)",
+    "schedule": {
+        "quartz_cron_expression": "0 */10 * * * ?",
+        "timezone_id": "UTC",
+        "pause_status": "UNPAUSED"
+    },
+    "max_concurrent_runs": 1,
+    "tasks": [
+        {
+            "task_key": "01_extract_and_bronze",
+            "description": "Extract from ELK API and write to Bronze layer",
+            "notebook_task": {
+                "notebook_path": "/Repos/genesys_call_quality/06_main_orchestrator",
+                "source": "WORKSPACE"
+            },
+            "job_cluster_key": "pipeline_cluster",
+            "timeout_seconds": 600,
+            "max_retries": 2,
+            "min_retry_interval_millis": 30000
+        }
+    ],
+    "job_clusters": [
+        {
+            "job_cluster_key": "pipeline_cluster",
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 1,
+                "spark_conf": {
+                    "spark.databricks.delta.optimizeWrite.enabled": "true",
+                    "spark.databricks.delta.autoCompact.enabled": "true"
+                },
+                "data_security_mode": "SINGLE_USER",
+                "runtime_engine": "STANDARD"
+            }
+        }
+    ],
+    "email_notifications": {
+        "on_failure": ["your-team@company.com"],
+        "no_alert_for_skipped_runs": true
+    },
+    "tags": {
+        "project": "genesys-call-quality",
+        "team": "data-engineering",
+        "layer": "full-pipeline"
+    }
+}
