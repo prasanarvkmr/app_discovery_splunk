@@ -242,6 +242,7 @@ class ELKExtractor:
         try:
             pit_id = self.open_pit()
             records, total = self.fetch_all_pages(pit_id, start_ts, end_ts)
+            self.mark_extraction_complete(start_ts, end_ts, total)
             return records, total, start_ts, end_ts
         except Exception as e:
             print(f"EXTRACTION FAILED: {e}")
