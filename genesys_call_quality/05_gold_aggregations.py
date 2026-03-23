@@ -5,9 +5,13 @@
 
 # COMMAND ----------
 
+# MAGIC %run ./config
+
+# COMMAND ----------
+
 from pyspark.sql import functions as F
 from delta.tables import DeltaTable
-from config import PipelineConfig as C
+C = PipelineConfig
 
 # COMMAND ----------
 
@@ -43,7 +47,7 @@ class GoldAggregations:
                         SUM(CASE WHEN overall_call_status = 'DEGRADED' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2
                     ) AS degraded_pct,
                     ROUND(
-                        (SUM(CASE WHEN overall_call_status IN ('ERRORED', 'DEGRADED') THEN 1 ELSE 0 END)) * 100.0 / COUNT(*), 2
+                        SUM(CASE WHEN overall_call_status = 'NORMAL' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2
                     ) AS call_quality_pct
                 FROM {C.SILVER_FACT_CONVERSATIONS}
                 WHERE call_date >= CURRENT_DATE - INTERVAL {self.recompute_days} DAYS

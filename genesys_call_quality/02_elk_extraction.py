@@ -5,12 +5,16 @@
 
 # COMMAND ----------
 
+# MAGIC %run ./config
+
+# COMMAND ----------
+
 import requests
 import json
 import time
 from datetime import datetime, timedelta
 from pyspark.sql import functions as F
-from config import PipelineConfig as C
+C = PipelineConfig
 
 # COMMAND ----------
 
@@ -218,7 +222,7 @@ class ELKExtractor:
             "extraction_end_ts": end_ts,
             "page_num": -1,
             "records_fetched": total_records,
-            "search_after_cursor": None,
+            "search_after_cursor": "",
             "status": "COMPLETED",
             "checkpoint_ts": datetime.utcnow().isoformat()
         }])
@@ -242,7 +246,6 @@ class ELKExtractor:
         try:
             pit_id = self.open_pit()
             records, total = self.fetch_all_pages(pit_id, start_ts, end_ts)
-            self.mark_extraction_complete(start_ts, end_ts, total)
             return records, total, start_ts, end_ts
         except Exception as e:
             print(f"EXTRACTION FAILED: {e}")

@@ -6,13 +6,17 @@
 
 # COMMAND ----------
 
+# MAGIC %run ./config
+
+# COMMAND ----------
+
 import json
 from datetime import datetime
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType, TimestampType, LongType
 )
-from config import PipelineConfig as C
+C = PipelineConfig
 
 # COMMAND ----------
 
@@ -166,12 +170,13 @@ class BronzeIngestion:
             .withColumn("_batch_id", F.lit(batch_id))
         )
 
+        row_count = len(flattened)
+
         (bronze_df.write
             .format("delta")
             .mode("append")
             .saveAsTable(C.BRONZE_RAW)
         )
 
-        row_count = bronze_df.count()
         print(f"Wrote {row_count} participant records to bronze.")
         return row_count

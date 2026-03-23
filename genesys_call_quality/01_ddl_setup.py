@@ -5,7 +5,11 @@
 
 # COMMAND ----------
 
-from config import PipelineConfig as C
+# MAGIC %run ./config
+
+# COMMAND ----------
+
+C = PipelineConfig
 
 # COMMAND ----------
 

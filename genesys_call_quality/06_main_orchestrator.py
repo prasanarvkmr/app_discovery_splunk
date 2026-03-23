@@ -16,8 +16,12 @@
 
 # COMMAND ----------
 
-from config import PipelineConfig as C
+# MAGIC %run ./config
+
+# COMMAND ----------
+
 from datetime import datetime
+C = PipelineConfig
 
 print(f"Pipeline started at {datetime.utcnow().isoformat()}Z")
 print(f"Catalog: {C.CATALOG}")
@@ -29,7 +33,9 @@ print(f"Catalog: {C.CATALOG}")
 
 # COMMAND ----------
 
-from elk_extraction import ELKExtractor
+# MAGIC %run ./02_elk_extraction
+
+# COMMAND ----------
 
 extractor = ELKExtractor(spark, dbutils)
 records, total, start_ts, end_ts = extractor.extract()
@@ -43,7 +49,9 @@ print(f"Extracted {total} records for window {start_ts} → {end_ts}")
 
 # COMMAND ----------
 
-from bronze_ingestion import BronzeIngestion
+# MAGIC %run ./03_bronze_ingestion
+
+# COMMAND ----------
 
 bronze = BronzeIngestion(spark)
 bronze_count = bronze.write_to_bronze(records, start_ts, end_ts)
@@ -59,7 +67,9 @@ print(f"Bronze ingestion complete. {bronze_count} participant records written.")
 
 # COMMAND ----------
 
-from silver_transformations import SilverTransformations
+# MAGIC %run ./04_silver_transformations
+
+# COMMAND ----------
 
 silver = SilverTransformations(spark)
 silver.run_all()
@@ -71,7 +81,9 @@ silver.run_all()
 
 # COMMAND ----------
 
-from gold_aggregations import GoldAggregations
+# MAGIC %run ./05_gold_aggregations
+
+# COMMAND ----------
 
 gold = GoldAggregations(spark)
 gold.run_all()

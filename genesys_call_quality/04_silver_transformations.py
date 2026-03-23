@@ -5,10 +5,14 @@
 
 # COMMAND ----------
 
+# MAGIC %run ./config
+
+# COMMAND ----------
+
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from delta.tables import DeltaTable
-from config import PipelineConfig as C
+C = PipelineConfig
 
 # COMMAND ----------
 
@@ -142,12 +146,12 @@ class SilverTransformations:
     # Step 2a: Participants → fact_conversations
     # ─────────────────────────────────────────────────
 
-    def process_conversations(self):
+    def process_conversations(self, watermark=None):
         """
         Pivot participant-level data into one row per conversation.
         Derives overall_call_status as the worst of agent + customer.
         """
-        last_watermark = self.get_last_silver_watermark()
+        last_watermark = watermark or self.get_last_silver_watermark()
 
         # Rollup: one row per conversation with agent/customer metrics pivoted
         conv_rollup = self.spark.sql(f"""
@@ -158,12 +162,21 @@ class SilverTransformations:
                 MAX(CASE WHEN purpose = 'agent' THEN agent_id END) AS agent_id,
                 MAX(CASE WHEN purpose = 'agent' THEN email_id END) AS email_id,
                 MAX(CASE WHEN purpose = 'agent' THEN mos_score END) AS agent_mos_score,
-                MAX(CASE WHEN purpose = 'agent' THEN call_status END) AS agent_call_status,
+                -- Worst-status wins: ERRORED > DEGRADED > NORMAL
+                CASE
+                    WHEN MAX(CASE WHEN purpose = 'agent' AND call_status = 'ERRORED' THEN 1 ELSE 0 END) = 1 THEN 'ERRORED'
+                    WHEN MAX(CASE WHEN purpose = 'agent' AND call_status = 'DEGRADED' THEN 1 ELSE 0 END) = 1 THEN 'DEGRADED'
+                    ELSE 'NORMAL'
+                END AS agent_call_status,
                 MAX(CASE WHEN purpose = 'agent' THEN error_code END) AS agent_error_code,
 
                 -- Customer-side
                 MAX(CASE WHEN purpose = 'customer' THEN mos_score END) AS customer_mos_score,
-                MAX(CASE WHEN purpose = 'customer' THEN call_status END) AS customer_call_status,
+                CASE
+                    WHEN MAX(CASE WHEN purpose = 'customer' AND call_status = 'ERRORED' THEN 1 ELSE 0 END) = 1 THEN 'ERRORED'
+                    WHEN MAX(CASE WHEN purpose = 'customer' AND call_status = 'DEGRADED' THEN 1 ELSE 0 END) = 1 THEN 'DEGRADED'
+                    ELSE 'NORMAL'
+                END AS customer_call_status,
                 MAX(CASE WHEN purpose = 'customer' THEN error_code END) AS customer_error_code,
 
                 -- Shared fields
@@ -217,12 +230,12 @@ class SilverTransformations:
     # Step 2b: Participants → fact_agent_legs
     # ─────────────────────────────────────────────────
 
-    def process_agent_legs(self):
+    def process_agent_legs(self, watermark=None):
         """
         Extract agent-purpose records into per-agent-per-conversation legs.
         Handles multi-agent (transfer) scenarios with leg_sequence.
         """
-        last_watermark = self.get_last_silver_watermark()
+        last_watermark = watermark or self.get_last_silver_watermark()
 
         agent_legs = self.spark.sql(f"""
             SELECT
@@ -363,12 +376,18 @@ class SilverTransformations:
         print("SILVER LAYER — Starting transformations")
         print("=" * 60)
 
+        # Capture watermark BEFORE processing participants —
+        # process_conversations / process_agent_legs need to find the rows
+        # that process_participants is about to insert/update.
+        pre_run_watermark = self.get_last_silver_watermark()
+
         # Step 1: Bronze → Participants (must run first)
         self.process_participants()
 
-        # Step 2a & 2b: Participants → Conversations + Agent Legs (independent, run sequentially)
-        self.process_conversations()
-        self.process_agent_legs()
+        # Step 2a & 2b: Participants → Conversations + Agent Legs
+        # Use the pre-run watermark so the new rows (with _processed_ts > pre_run) are included
+        self.process_conversations(pre_run_watermark)
+        self.process_agent_legs(pre_run_watermark)
 
         # Step 3: Upsert agent dimension
         self.upsert_dim_agents()
