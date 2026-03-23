@@ -71,7 +71,7 @@ class ELKExtractor:
         response = self._request_with_retry(
             method="POST",
             url=f"{self.base_url}/{self.index}/_pit?keep_alive={self.pit_keep_alive}",
-            body=None
+            body={}
         )
         pit_id = response["id"]
         print(f"PIT opened: {pit_id[:50]}...")
